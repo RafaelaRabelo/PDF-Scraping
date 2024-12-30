@@ -1,0 +1,164 @@
+import os
+import fitz  
+import pandas as pd
+
+# Definições
+caminho_principal = "xxxx"
+inicio_padroes = ["AHTS and PSV Term Day Rate Ranges"]
+frases_finais = ["The IHS Petrodata"]
+caminho_csv = "xxxx"
+arquivo_parar = "2017 07 OMM.pdf"  # Nome do arquivo para parar a execução
+
+# Função para extrair texto usando PyMuPDF a partir da página 6 (índice 5)
+def extrair_texto_pdf_pymupdf(caminho_pdf, pagina_inicial=5):
+    try:
+        doc = fitz.open(caminho_pdf)
+        texto = ""
+        for pagina_num in range(pagina_inicial, len(doc)):
+            pagina = doc.load_page(pagina_num)
+            texto += pagina.get_text()
+        return texto.encode('utf-8').decode('utf-8'), doc
+    except Exception as e:
+        print(f"Erro ao abrir o PDF com PyMuPDF: {e}")
+        return "", None
+
+# Função para encontrar a tabela desejada
+def encontrar_tabela(texto, inicio_padroes, finais):
+    texto = texto.upper()  # Normaliza o texto para comparação
+    pos_inicio = None
+
+    for padrao in inicio_padroes:
+        padrao_upper = padrao.upper()
+        pos = texto.find(padrao_upper)
+        if pos != -1 and (pos_inicio is None or pos < pos_inicio):
+            pos_inicio = pos
+    
+    if pos_inicio is None:
+        return ""
+
+    fim_pos = len(texto)
+    for frase_fim in finais:
+        frase_fim_upper = frase_fim.upper()
+        pos_fim = texto.find(frase_fim_upper, pos_inicio)
+        if pos_fim != -1 and pos_fim < fim_pos:
+            fim_pos = pos_fim
+    
+    if fim_pos > pos_inicio:
+        tabela = texto[pos_inicio:fim_pos].strip()
+        return tabela
+    return ""
+
+# Função para limpar e processar os dados extraídos
+def processar_dados_brutos(tabela, nome_arquivo):
+    if not tabela:
+        print(f"Sem dados para processar no arquivo {nome_arquivo}.")
+        return pd.DataFrame()
+
+    # Limpar as linhas indesejadas e vazias
+    lines = tabela.split('\n')
+    lines = [line.strip() for line in lines if line.strip() and not line.startswith("USD Low") and not line.startswith("USD Avg") and not line.startswith("USD High") and not line.startswith("USD LOW") and not line.startswith("USD AVG") and not line.startswith("USD HIGH")]
+    
+    # Estruturas para armazenar os dados
+    parsed_data = []
+    current_local = None
+    current_embarcacao = None
+    data_block = []
+
+    def is_header(line):
+        return line in ['USD Low', 'USD Avg', 'USD High']
+
+    for line in lines:
+        line = line.strip()
+        
+        if line in ['US GULF OF MEXICO', 'MEXICO', 'SOUTH AMERICA', 'NORTHWEST EUROPE', 'WEST AFRICA', 'MIDDLE EAST', 'INDIAN OCEAN', 'SOUTHEAST ASIA']:
+            if current_local and current_embarcacao:
+                while data_block:
+                    if len(data_block) >= 3:
+                        parsed_data.append({
+                            'Arquivo': nome_arquivo,
+                            'Fonte': 'Offshore Marine Monthly',
+                            'Tipo de embarcacao': 'AHTS' if 'AHTS 18,000+ BHP' in current_embarcacao else 'Nao definido',
+                            'Local': current_local,
+                            'Embarcacao': current_embarcacao,
+                            'USD Low': data_block.pop(0).replace(',', '').strip(),
+                            'USD Avg': data_block.pop(0).replace(',', '').strip(),
+                            'USD High': data_block.pop(0).replace(',', '').strip()
+                        })
+            current_local = line
+            data_block = []
+            continue
+
+        if line.startswith('AHTS') or line.startswith('PSV'):
+            if current_embarcacao and data_block:
+                while data_block:
+                    if len(data_block) >= 3:
+                        parsed_data.append({
+                            'Arquivo': nome_arquivo,
+                            'Fonte': 'Offshore Marine Monthly',
+                            'Tipo de embarcacao': 'AHTS' if 'AHTS 18,000+ BHP' in line else 'Nao definido',
+                            'Local': current_local,
+                            'Embarcacao': current_embarcacao,
+                            'USD Low': data_block.pop(0).replace(',', '').strip(),
+                            'USD Avg': data_block.pop(0).replace(',', '').strip(),
+                            'USD High': data_block.pop(0).replace(',', '').strip()
+                        })
+            current_embarcacao = line
+            continue
+
+        if line and not is_header(line):
+            data_block.append(line)
+
+    if current_embarcacao and data_block:
+        while data_block:
+            if len(data_block) >= 3:
+                parsed_data.append({
+                    'Arquivo': nome_arquivo,
+                    'Fonte': 'Offshore Marine Monthly',
+                    'Tipo de embarcacao': 'AHTS' if 'AHTS 18,000+ BHP' in current_embarcacao else 'Nao definido',
+                    'Local': current_local,
+                    'Embarcacao': current_embarcacao,
+                    'USD Low': data_block.pop(0).replace(',', '').strip(),
+                    'USD Avg': data_block.pop(0).replace(',', '').strip(),
+                    'USD High': data_block.pop(0).replace(',', '').strip()
+                })
+
+    df = pd.DataFrame(parsed_data)
+    df.replace('n/a', pd.NA, inplace=True)
+    df.fillna('N/A', inplace=True)
+    return df
+
+# Função principal para processar PDFs e retornar o DataFrame
+def processar_pdfs(diretorio_principal):
+    df_total = pd.DataFrame()
+    parar_execucao = False
+
+    for root, dirs, files in os.walk(diretorio_principal):
+        for filename in files:
+            if filename.endswith(".pdf"):
+                if filename == arquivo_parar:
+                    print(f"Arquivo {arquivo_parar} encontrado. Parando a execução.")
+                    parar_execucao = True
+                    break
+                
+                caminho_pdf = os.path.join(root, filename)
+                print(f"Lendo o arquivo: {caminho_pdf}")
+                texto, doc = extrair_texto_pdf_pymupdf(caminho_pdf, pagina_inicial=5)
+                tabela = encontrar_tabela(texto, inicio_padroes, frases_finais)
+                if tabela:
+                    df = processar_dados_brutos(tabela, filename)
+                    df_total = pd.concat([df_total, df], ignore_index=True)
+                else:
+                    print(f"Nenhuma tabela encontrada no arquivo: {caminho_pdf}")
+
+        if parar_execucao:
+            break
+
+    return df_total
+
+# Executar a função principal e obter o DataFrame final
+df_final = processar_pdfs(caminho_principal)
+
+# Salvar o DataFrame em um arquivo CSV
+df_final.to_csv(caminho_csv, sep=';', decimal=',', index=False)
+
+print(f"Dados salvos em: {caminho_csv}")
