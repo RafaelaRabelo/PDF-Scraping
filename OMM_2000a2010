@@ -1,0 +1,170 @@
+import os
+import fitz  
+import pandas as pd
+
+# Definições
+caminho_principal = "xxxx"
+frases_finais = ["Notes: Asia-Pacific day"]
+caminho_csv = "xxxx"
+
+# Texto das notas a serem excluídas
+notas_para_excluir = [
+    "Notes: West Africa day rate ranges are taken from both term and spot fixtures and combine", 
+    "both fixture and bid information.",
+    "Notes: Asia-Pacific day rate ranges are taken from both term and spot fixtures and combine",
+    "both fixture and bid information.",
+    "Notes: GOM day rate and utilisation surveys are conducted the week before newsletter",
+    "publication date. GOM day rate data makes no distinction between spot and term markets,",
+    "but in general high end of range can be equated with the spot market.",
+    "Notes: US Gulf of Mexico day rate data makes no distinction between spot and term markets,",
+    "but in general high end of range can be equated with the spot market."
+]
+
+# Função para extrair texto usando PyMuPDF a partir da página 4
+def extrair_texto_pdf_pymupdf(caminho_pdf, pagina_inicial=3):
+    try:
+        doc = fitz.open(caminho_pdf)
+        texto = ""
+        for pagina_num in range(pagina_inicial, len(doc)):
+            pagina = doc.load_page(pagina_num)
+            texto += pagina.get_text()
+        return texto.encode('utf-8').decode('utf-8')
+    except Exception as e:
+        print(f"Erro ao abrir o PDF com PyMuPDF: {e}")
+        return ""
+
+# Função para encontrar todas as tabelas no texto
+def encontrar_tabelas(texto, inicio_padroes, finais):
+    tabelas = []
+    pos_inicio = 0
+
+    while True:
+        inicio_pos = None
+        for padrao in inicio_padroes:
+            pos = texto.find(padrao, pos_inicio)
+            if pos != -1 and (inicio_pos is None or pos < inicio_pos):
+                inicio_pos = pos
+        
+        if inicio_pos is None:
+            break
+        
+        fim_pos = len(texto)
+        for frase_fim in finais:
+            pos_fim = texto.find(frase_fim, inicio_pos)
+            if pos_fim != -1 and pos_fim < fim_pos:
+                fim_pos = pos_fim
+        
+        if fim_pos > inicio_pos:
+            tabela = texto[inicio_pos:fim_pos].strip()
+            linhas = tabela.split('\n')
+            # Remove linhas em branco, linhas que contêm notas específicas e "Day rate ranges (USD)"
+            linhas_filtradas = [linha.strip() for linha in linhas if linha.strip() and not any(nota in linha for nota in notas_para_excluir) and "Day rate ranges (USD)" not in linha]
+            tabelas.append(linhas_filtradas)
+            pos_inicio = fim_pos
+        else:
+            break
+
+    return tabelas
+
+# Função para processar o texto e retornar uma lista de dicionários
+def processar_texto(linhas, nome_arquivo):
+    dados = []
+    i = 0
+    
+    while i < len(linhas):
+        linha = linhas[i].strip()
+        
+        if linha in ['West Africa', 'Gulf of Mexico', 'US Gulf of Mexico', 'Asia-Pacific']:
+            local = linha.replace('US Gulf of Mexico', 'Gulf of Mexico')
+            i += 1
+            datas = [linhas[i].strip(), linhas[i + 1].strip()]
+            i += 2
+            
+            while i < len(linhas) and linhas[i].strip() not in ['PSV > 2,000', 'AHTS < 10,000', 'AHTS 10,000+ bhp', 'PSV < 200’', 'PSV > 200’', 'PSV > 200’ DP*', 'AHTS 10,000 bhp+*', '5-5,999 bhp', '6-6,999 bhp', '7-8,999 bhp', '9-11,999 bhp', '12-14,999 bhp']:
+                i += 1
+            
+            while i < len(linhas) and linhas[i].strip() not in ['West Africa', 'Gulf of Mexico', 'US Gulf of Mexico', 'Asia-Pacific', '']:
+                categoria = linhas[i].strip()
+                i += 1
+                if i + 3 < len(linhas):
+                    high = [linhas[i].strip(), linhas[i + 2].strip()]
+                    low = [linhas[i + 1].strip(), linhas[i + 3].strip()]
+                    i += 4
+                    dados.append({
+                        'Local': local,
+                        'Data': datas[0],
+                        'Embarcacao': categoria,
+                        'High': high[0].replace(',', '.').replace('â€™', "'").replace('’', "'"),
+                        'Low': low[0].replace(',', '.').replace('â€™', "'").replace('’', "'"),
+                        'Arquivo': nome_arquivo,
+                        'Fonte': 'Offshore Marine Monthly',
+                        'Tipo de embarcacao': 'AHTS' if 'AHTS 18k+' in categoria else 'Nao definido'
+                    })
+                    dados.append({
+                        'Local': local,
+                        'Data': datas[1],
+                        'Embarcacao': categoria,
+                        'High': high[1].replace(',', '.').replace('â€™', "'").replace('’', "'"),
+                        'Low': low[1].replace(',', '.').replace('â€™', "'").replace('’', "'"),
+                        'Arquivo': nome_arquivo,
+                        'Fonte': 'Offshore Marine Monthly',
+                        'Tipo de embarcacao': 'AHTS' if 'AHTS 18k+' in categoria else 'Nao definido'
+                    })
+        else:
+            i += 1
+    
+    return dados
+
+# Função para salvar DataFrame em CSV
+def salvar_csv(df, caminho_csv):
+    try:
+        df.to_csv(caminho_csv, sep=';', index=False, decimal=',', encoding='utf-8')
+        print(f"Arquivo CSV salvo em: {caminho_csv}")
+    except Exception as e:
+        print(f"Erro ao salvar CSV: {e}")
+
+# Função para processar PDFs e criar DataFrame
+def processar_pdfs(diretorio_principal):
+    todos_dados = []
+    
+    for root, dirs, files in os.walk(diretorio_principal):
+        for filename in files:
+            if filename.endswith(".pdf"):
+                caminho_pdf = os.path.join(root, filename)
+                print(f"Lendo o arquivo: {caminho_pdf}")
+                texto = extrair_texto_pdf_pymupdf(caminho_pdf)
+                tabelas = encontrar_tabelas(texto, ["Day rate ranges (USD)"], frases_finais)
+                
+                for i, tabela in enumerate(tabelas):
+                    print(f"\nTabela {i + 1} extraída do arquivo {filename}:")
+                    for linha in tabela:
+                        print(linha)
+                    
+                    # Remove linhas com "High" e "Low" e "Day rate ranges (USD)"
+                    linhas_filtradas = [linha for linha in tabela if "High" not in linha and "Low" not in linha]
+                    dados = processar_texto(linhas_filtradas, filename)
+                    
+                    # Adiciona dados ao DataFrame
+                    df = pd.DataFrame(dados)
+                    todos_dados.append(df)
+    
+    # Concatenar todos os DataFrames e salvar em CSV
+    if todos_dados:
+        df_final = pd.concat(todos_dados, ignore_index=True)
+        salvar_csv(df_final, caminho_csv)
+        
+        # Abrir o CSV para substituição de caracteres
+        with open(caminho_csv, 'r', encoding='utf-8') as file:
+            conteudo = file.read()
+        
+        # Substituir 'â€™' por '\''
+        conteudo = conteudo.replace('â€™', "'").replace('’', "'")
+        
+        # Salvar o arquivo corrigido
+        with open(caminho_csv, 'w', encoding='utf-8') as file:
+            file.write(conteudo)
+        
+        print(f"Substituição de caracteres concluída no arquivo CSV: {caminho_csv}")
+
+# Executar a função principal
+processar_pdfs(caminho_principal)
