@@ -1,0 +1,239 @@
+import os
+import fitz  # PyMuPDF
+import pandas as pd
+import re
+
+# Definições
+caminho_principal = "xxxx"
+frases_finais = [
+    "*1 Low-end",
+    "*1 Low end",
+    "*1 Rates",
+    "The figures in the table above",
+    "*1 Accommodation",
+    "As of",
+    "*1 All accommodation"
+]
+
+# Mapeamento dos tipos de embarcação
+mapeamento_embarcacao = {
+    "Accommodation": ("Nao definido", "Day Rates in the Construction Vessem Market"),
+    "Derrick": ("Nao definido", "Day Rates in the Construction Vessem Market"),
+    "Derrick Pipelay": ("Nao definido", "Day Rates in the Construction Vessem Market"),
+    "Diving Support": ("SDSV", "Day Rates in the Construction Vessem Market"),
+    "Multiservice": ("Nao definido", "Day Rates in the Construction Vessem Market"),
+    "Pipelay": ("PLSV", "Day Rates in the Construction Vessem Market"),
+    "ROV Support": ("Nao definido", "Day Rates in the Construction Vessem Market"),
+    "Well Intervention": ("SESV", "Day Rates in the Construction Vessem Market"),
+    "Heavy Lift Crane": ("Nao definido", "Day Rates in the Construction Vessem Market"),
+    "Heavy Lift Pipelay": ("Nao definido", "Day Rates in the Construction Vessem Market"),
+    "Heavy Construction": ("MPSV", "Day Rates in the Construction Vessem Market"),
+    "Light Construction": ("RSV", "Day Rates in the Construction Vessem Market"),
+    "SOV": ("Nao definido", "Day Rates in the Construction Vessem Market")
+}
+
+# Função para extrair texto usando PyMuPDF
+def extrair_texto_pdf_pymupdf(caminho_pdf):
+    try:
+        doc = fitz.open(caminho_pdf)
+        texto = ""
+        for pagina in doc:
+            texto += pagina.get_text()
+        return texto
+    except Exception as e:
+        print(f"Erro ao abrir o PDF com PyMuPDF: {e}")
+        return ""
+
+# Função para ajustar a coluna "Direction" para a linha correta
+def ajustar_direcao(linhas):
+    direcao = ["Decrease", "Stable", "Increase"]
+    linhas_ajustadas = []
+    
+    for linha in linhas:
+        linha = linha.strip()
+        if any(d in linha for d in direcao):
+            partes = re.split(r'(\bDecrease\b|\bStable\b|\bIncrease\b)', linha)
+            partes = [p.strip() for p in partes if p.strip()]
+            if len(partes) > 1:
+                for parte in partes:
+                    if parte in direcao:
+                        linhas_ajustadas.append(parte)
+                    else:
+                        linhas_ajustadas.append(parte)
+            else:
+                linhas_ajustadas.append(linha)
+        else:
+            linhas_ajustadas.append(linha)
+    
+    return linhas_ajustadas
+
+# Função para encontrar todas as tabelas no texto
+def encontrar_tabelas(texto, inicio_padroes, finais):
+    tabelas = []
+    pos_inicio = 0
+
+    while True:
+        inicio_pos = None
+        for padrao in inicio_padroes:
+            pos = texto.find(padrao, pos_inicio)
+            if pos != -1 and (inicio_pos is None or pos < inicio_pos):
+                inicio_pos = pos
+        
+        if inicio_pos is None:
+            break
+        
+        fim_pos = len(texto)
+        for frase_fim in finais:
+            pos_fim = texto.find(frase_fim, inicio_pos)
+            if pos_fim != -1 and pos_fim < fim_pos:
+                fim_pos = pos_fim
+        
+        if fim_pos > inicio_pos:
+            tabela = texto[inicio_pos:fim_pos].strip()
+            # Divida o texto em linhas e ajuste as linhas
+            linhas = tabela.split('\n')
+            linhas_ajustadas = ajustar_direcao(linhas)
+            tabela_ajustada = '\n'.join(linhas_ajustadas)
+            tabelas.append(tabela_ajustada)
+            pos_inicio = fim_pos
+        else:
+            break
+
+    return tabelas
+
+# Função para verificar se uma string é um número
+def e_numero(valor):
+    try:
+        # Remove possíveis símbolos e formatações antes de verificar
+        float(valor.replace(',', '').replace('$', '').strip())
+        return True
+    except ValueError:
+        return False
+
+# Função para formatar valores numéricos
+def formatar_valores(df):
+    for coluna in ["Low End (USD)", "High End (USD)", "Average (USD)"]:
+        if coluna in df.columns:
+            df[coluna] = df[coluna].apply(lambda x: re.sub(r'(\d+),(\d+)', r'\1.\2', str(x)))
+    return df
+
+# Função para processar PDFs e organizar dados em colunas
+def processar_pdfs(diretorio_principal):
+    all_data = []
+    for root, dirs, files in os.walk(diretorio_principal):
+        for filename in files:
+            if filename.endswith(".pdf"):
+                caminho_pdf = os.path.join(root, filename)
+                print(f"Processando o arquivo: {caminho_pdf}")
+                tabelas = encontrar_tabelas(extrair_texto_pdf_pymupdf(caminho_pdf), ["Day rate ranges USD", "Day rate ranges $"], frases_finais)
+                
+                for tabela in tabelas:
+                    linhas = tabela.split('\n')
+                    # Colunas esperadas
+                    colunas = [
+                        "Periodo", "Local", "Vessel Type", "Specification", 
+                        "Low End (USD)", "High End (USD)", "Average (USD)", "Direction",
+                        "Tipo de embarcacao", "Local de extracao"
+                    ]
+
+                    periodo = ""
+                    local_info = ""
+                    vessel_type = ""
+                    specification = "N/A"  # Default value for specification
+                    low_end = ""
+                    high_end = ""
+                    average = ""
+                    direction = ""
+
+                    i = 0
+                    while i < len(linhas):
+                        linha = linhas[i].strip()
+                        
+                        # Identificar o período
+                        if "Day rate ranges USD" in linha or "Day rate ranges $" in linha:
+                            periodo = linha.split("–")[1].strip() if len(linha.split("–")) > 1 else ''
+                        
+                        # Identificar o local_info
+                        elif i == 1 and linha not in ["Local"]:
+                            local_info = linha
+                        
+                        # Identificar e processar as linhas de dados
+                        if e_numero(linha):
+                            # Atribuir valores conforme a posição das variáveis
+                            if not low_end:
+                                low_end = linha
+                            elif not high_end:
+                                high_end = linha
+                            elif not average:
+                                average = linha
+                        elif linha in ["Decrease", "Stable", "Increase"]:
+                            direction = linha
+                        elif linha.startswith("*"):  # Assume that specification starts with "*"
+                            if not specification:
+                                specification = linha
+                        else:
+                            # Verifica se a linha é um Vessel Type
+                            if any(vessel_type in linha for vessel_type in mapeamento_embarcacao.keys()):
+                                # Adiciona o registro anterior, se houver
+                                if vessel_type:
+                                    tipo_embarcacao, local_extracao = mapeamento_embarcacao.get(vessel_type, ("Não definido", "Não definido"))
+                                    if not specification:
+                                        specification = "N/A"
+                                    all_data.append([periodo, local_info, vessel_type, specification, low_end, high_end, average, direction, tipo_embarcacao, local_extracao])
+                                
+                                vessel_type = linha
+                                specification = ""  # Reset specification for new vessel type
+                                low_end = ""
+                                high_end = ""
+                                average = ""
+                                direction = ""
+                        
+                        i += 1
+                    
+                    # Adicionar o último registro
+                    if vessel_type:
+                        tipo_embarcacao, local_extracao = mapeamento_embarcacao.get(vessel_type, ("Não definido", "Não definido"))
+                        if not specification:
+                            specification = "N/A"
+                        all_data.append([periodo, local_info, vessel_type, specification, low_end, high_end, average, direction, tipo_embarcacao, local_extracao])
+
+    # Criar um DataFrame
+    df = pd.DataFrame(all_data, columns=colunas)
+
+    # Substituir períodos trimestrais no DataFrame
+    if "Periodo" in df.columns:
+        def substituir_periodo(periodo):
+            # Normalizar o texto para minúsculas e aplicar as substituições
+            periodo_normalizado = periodo.lower()
+            if "first quarter" in periodo_normalizado:
+                return re.sub(r"first quarter (\d{4})", r"1T\1", periodo, flags=re.IGNORECASE)
+            elif "second quarter" in periodo_normalizado:
+                return re.sub(r"second quarter (\d{4})", r"2T\1", periodo, flags=re.IGNORECASE)
+            elif "third quarter" in periodo_normalizado:
+                return re.sub(r"third quarter (\d{4})", r"3T\1", periodo, flags=re.IGNORECASE)
+            elif "fourth quarter" in periodo_normalizado:
+                return re.sub(r"fourth quarter (\d{4})", r"4T\1", periodo, flags=re.IGNORECASE)
+            return periodo
+        
+        df["Periodo"] = df["Periodo"].apply(substituir_periodo)
+
+    # Formatar valores numéricos no DataFrame
+    df = formatar_valores(df)
+
+    # Preencher linhas em branco com valores da linha anterior
+    df = df.fillna(method='ffill')
+    
+    # Garantir que valores específicos na coluna "Direction" sejam preenchidos
+    if "Direction" in df.columns:
+        df["Direction"] = df["Direction"].replace('', pd.NA).fillna(method='ffill')
+
+    # Definir o caminho para salvar o arquivo CSV
+    csv_path = "xxxx"
+    df.to_csv(csv_path, sep=";", index=False)
+
+    # Exibir a tabela organizada após o tratamento
+    print(f"\nTabela organizada após o tratamento (exportada para {csv_path}):")
+    print(df.to_string(index=False))
+
+# Executar a função principal
+processar_pdfs(caminho_principal)
